@@ -1,0 +1,186 @@
+package com.server.socket;
+
+import java.io.IOException;
+import java.net.ServerSocket;
+import java.util.TreeMap;
+import java.util.ArrayList;
+import java.util.Map.Entry;
+
+import com.server.other.RemotePair;
+import com.server.socket.handler.BasicCollector;
+import com.server.socket.handler.MobileHandleCollector;
+import com.server.socket.handler.MonitorHandler;
+import com.server.socket.handler.MobileHandler.MobileHandlerCallback;
+import com.server.socket.handler.MonitorHandler.MonitorHandlerCallback;
+import com.server.socket.handler.MonitorHandlerCollector;
+import com.server.socket.remote.RemoteDevice;
+import com.server.socket.remote.RemoteDevice.RemoteDeviceConnectionShutDownCallback;
+import com.server.socket.remote.SerialRemoteDevice;
+
+public class SecuritySocketServer extends ServerSocket implements MonitorHandlerCallback,  MobileHandlerCallback, RemoteDeviceConnectionShutDownCallback{
+	public static final int DEFAULT_PORT	= 45678;
+	public static final String DEFAULT_IP	= "192.168.2.112";
+	// Server mode
+	public static final int COUPLE = 0;
+	public static final int SINGLE = 1;
+	// Remote type code
+	public static final int MONITOR_CODE	= 1;
+	public static final int MOBILE_CODE		= 2;
+	// Remote type
+	public static final String MONITOR	= "MONITOR";
+	public static final String MOBILE	= "MOBILE";
+	// Server response type
+	public static final int ACCESS_DENY = 0;
+	public static final int ACCESS_GRANT = 1;
+	// Remote device collector
+	protected MonitorHandlerCollector monitors	= new MonitorHandlerCollector();
+	protected MobileHandleCollector mobiles		= new MobileHandleCollector();
+	// Callbacks
+	protected ArrayList<ServerConnectionCallback> cCallbacks;
+	protected ArrayList<ServerModeChangeListener> mCallbacks;
+	// 
+	protected int mode;
+	public SecuritySocketServer(int port) throws IOException {
+		super(port);
+		cCallbacks = new ArrayList<>();
+		mCallbacks = new ArrayList<>();
+		mode = COUPLE;
+	}
+	
+	public SecuritySocketServer() throws IOException {
+		this(DEFAULT_PORT);
+	}
+	
+	public void registerServerConnectionCallback(ServerConnectionCallback cCallback) {
+		cCallbacks.add(cCallback);
+	}
+	
+	public void unRegisterServerConnectionCallback(ServerConnectionCallback cCallback) {
+		cCallbacks.remove(cCallback);
+	}
+
+	
+	public void registerServerModeChangeCallback(ServerModeChangeListener mCallback) {
+		mCallbacks.add(mCallback);
+	}
+	
+	public void unRegisterServerModeChangeCallback(ServerModeChangeListener mCallback) {
+		mCallbacks.remove(mCallback);
+	}
+	public BasicCollector<SerialRemoteDevice> getMonitors() {
+		return monitors;
+	}
+	
+	public BasicCollector<RemoteDevice> getMobiles() {
+		return mobiles;
+	}
+	
+	public TreeMap<Integer, RemotePair> getRemotePairs() {
+		TreeMap<Integer, RemotePair> remoteMap = new TreeMap<Integer, RemotePair>();
+		
+		for(Entry<Integer, RemoteDevice> e: monitors.entrySet())
+			if(remoteMap.containsKey(e.getKey()) == false)
+				remoteMap.put(e.getKey(), new RemotePair(e.getValue(), mobiles.get(e.getKey())));
+		
+		for(Entry<Integer, RemoteDevice> e: mobiles.entrySet())
+			if(remoteMap.containsKey(e.getKey()) == false)
+				remoteMap.put(e.getKey(), new RemotePair(monitors.get(e.getKey()), e.getValue()));
+		
+		return remoteMap;
+	}
+	
+	public void setMode(int mode) {
+		this.mode = mode;
+		for(ServerModeChangeListener callback: mCallbacks)
+			callback.onStateChange(mode);
+		System.out.println("set mode:" + (mode == 0 ? "Couple" : "Single"));
+	}
+	
+	public int getMode() {
+		return mode;
+	}
+	
+	public void forcedSendAlarm(RemoteDevice remote) {
+		if(remote != null)
+			try {
+				mobiles.alarmMobile(remote);
+			} catch (IOException e) { }
+	}
+	
+	public void sendMonitorChar(int identity,char c) {
+		try {
+			monitors.sendChar(identity, c);
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+	}
+	
+	public void mobileShutdown(RemoteDevice remote) {
+		System.out.println("SecurityServerThread: " + remote.toString() + " thread shutdown");
+		mobiles.remove(remote.getIdentity());
+		for(ServerConnectionCallback callback: cCallbacks)
+			callback.onDisconnectMobile(remote);
+	}
+
+	public void monitorShutdown(RemoteDevice remote) {
+		System.out.println("SecurityServerThread: " + remote.toString() + " thread shutdown");
+		monitors.remove(remote.getIdentity());
+		for(ServerConnectionCallback callback: cCallbacks)
+			callback.onDisconnectMonitor(remote);
+	}
+	
+	/**
+	 * Monitor call back
+	 */
+	
+	@Override
+	public void onAlarm(RemoteDevice remote) {
+		if(mode == COUPLE)
+			try {
+				if(mobiles.alarmMobile(remote))
+					System.out.println("Send alarm to " + mobiles.getMatch(remote).toString());
+			} catch (IOException e) {
+				System.out.println("Send alarm from " + remote.toString() + " error");
+				e.printStackTrace();
+			}
+	}	
+	/**
+	 * Mobile call back
+	 */
+	@Override
+	public void onPause(RemoteDevice remote) {
+		monitors.pauseMonitor(remote);
+	}
+
+	@Override
+	public void onStop(RemoteDevice remote) {
+		monitors.stopMonitor(remote);
+	}
+
+	@Override
+	public void onResume(RemoteDevice remote) {
+		monitors.resumeMonitor(remote);
+	}
+	
+	public static interface ServerModeChangeListener {
+		public void onStateChange(int mode);
+	}
+
+	@Override
+	public void onShutDown(RemoteDevice remote) {
+		synchronized(this) {
+			if(remote.getType().equals(MonitorHandler.TYPE)) {
+				monitorShutdown(remote);
+			} else {
+				mobileShutdown(remote);
+			}
+		}
+	}
+	
+	public static interface ServerConnectionCallback {
+		public void onConnectMonitor(RemoteDevice monitor);
+		public void onConnectMobile(RemoteDevice mobile);
+		public void onDisconnectMonitor(RemoteDevice monitor);
+		public void onDisconnectMobile(RemoteDevice mobile);
+	}
+}
